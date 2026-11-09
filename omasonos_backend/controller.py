@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from .model import (
     choose_target_group,
@@ -527,6 +527,7 @@ class SonosController:
         radio_prefixes = (
             "x-sonosapi-stream:",
             "x-sonosapi-radio:",
+            "x-sonosapi-hls:",
             "x-rincon-mp3radio:",
             "hls-radio:",
         )
@@ -684,9 +685,46 @@ class SonosController:
             "x-sonos-https:",
             "x-sonosapi-radio:",
             "x-sonosapi-stream:",
+            "x-sonosapi-hls:",
+            "x-sonosapi-hls-static:",
             "hls-radio:",
         )
         return uri.lower().startswith(direct_prefixes)
+
+    def _service_accounts(self, favorites: list[Any]) -> dict[str, tuple[str, str]]:
+        """Map each favorite's account token to the sid and sn in its URI."""
+        accounts: dict[str, tuple[str, str]] = {}
+        for favorite in favorites:
+            resources = list(getattr(favorite, "resources", []) or [])
+            uri = str(getattr(resources[0], "uri", "") or "") if resources else ""
+            query = parse_qs(urlsplit(uri).query)
+            reference = self._favorite_reference(favorite)
+            desc = str(getattr(reference, "desc", "") or "")
+            if desc and "sid" in query and "sn" in query:
+                accounts[desc] = (query["sid"][0], query["sn"][0])
+        return accounts
+
+    @staticmethod
+    def _service_show_uri(
+        reference: Any, accounts: dict[str, tuple[str, str]]
+    ) -> str:
+        """Build the queue URI Sonos omits from saved music-service shows.
+
+        Only the speaker holds the service token, so it must expand the
+        container itself. The id's second hex word is the URI's flags value.
+
+        shortcut: needs another favorite on the same account to supply sid/sn,
+        read the speaker's account list if shows go missing without one.
+        """
+        item_id = str(getattr(reference, "item_id", "") or "")
+        account = accounts.get(str(getattr(reference, "desc", "") or ""))
+        if account is None or not item_id.startswith("1014"):
+            return ""
+        try:
+            flags = int(item_id[4:8], 16)
+        except ValueError:
+            return ""
+        return f"x-rincon-cpcontainer:{item_id}?sid={account[0]}&flags={flags}&sn={account[1]}"
 
     def refresh_favorites(self) -> None:
         self._favorites_loaded = True
@@ -709,6 +747,7 @@ class SonosController:
             )
             favorites = list(result)
             total = int(getattr(result, "total_matches", len(favorites)))
+            accounts = self._service_accounts(favorites)
             items: list[dict[str, str]] = []
             for favorite in favorites:
                 resources = list(getattr(favorite, "resources", []) or [])
@@ -735,6 +774,18 @@ class SonosController:
                             "podcastId": podcast_id,
                         }
                         identity = podcast_id
+                        kind = "podcast"
+                    elif show_uri := self._service_show_uri(reference, accounts):
+                        from soco.data_structures import DidlResource
+
+                        reference.resources = [
+                            DidlResource(
+                                uri=show_uri,
+                                protocol_info="x-rincon-cpcontainer:*:*:*",
+                            )
+                        ]
+                        playback = {"mode": "queue", "item": reference}
+                        identity = show_uri
                         kind = "podcast"
                 if playback is None:
                     continue

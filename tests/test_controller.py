@@ -355,6 +355,27 @@ def test_favorites_expose_only_directly_playable_items(tmp_path):
     }
 
 
+def test_bbc_sounds_hls_favorites_are_directly_playable(tmp_path):
+    controller, living, _, _ = make_controller(tmp_path)
+    live = "x-sonosapi-hls:stations~playable~~station-1?sid=325&flags=296&sn=1"
+    episode = "x-sonosapi-hls-static:ondemand~playable~~episode-1?sid=325&sn=2"
+    living.music_library = FakeMusicLibrary(
+        [
+            FakeFavorite("Radio 6 Music", live, "<meta />"),
+            FakeFavorite("Saved episode", episode, "<meta />"),
+        ]
+    )
+    snapshot = controller.refresh()
+    items = snapshot["favorites"]["items"]
+
+    assert snapshot["favorites"]["unsupported"] == 0
+    assert [item["kind"] for item in items] == ["radio", "audio"]
+
+    controller.play_favorite(items[0]["id"])
+
+    assert living.played_uri == {"uri": live, "meta": "<meta />", "start": True}
+
+
 def test_play_favorite_uses_cached_uri_and_metadata(tmp_path):
     controller, living, _, _ = make_controller(tmp_path)
     living.music_library = FakeMusicLibrary(
@@ -390,6 +411,37 @@ def test_queueable_container_favorite_is_added_and_played(tmp_path):
     controller.play_favorite(favorite_id)
 
     assert living.queued_item is reference
+    assert living.played_queue_index == 3
+
+
+def test_bbc_show_without_uri_is_queued_with_uri_built_from_its_account(tmp_path):
+    controller, living, _, _ = make_controller(tmp_path)
+    desc = "SA_RINCON83207_X_#Svc83207-0-Token"
+    station_uri = "x-sonosapi-hls:station?sid=325&flags=296&sn=1"
+    show = FakeReference(item_id="10140064ondemand~show", desc=desc)
+    orphan = FakeReference(item_id="10140064ondemand~other", desc="unknown-account")
+    living.music_library = FakeMusicLibrary(
+        [
+            FakeFavorite(
+                "Station", station_uri, reference=FakeReference(desc=desc)
+            ),
+            FakeFavorite("Show", reference=show),
+            FakeFavorite("No matching account", reference=orphan),
+        ]
+    )
+    snapshot = controller.refresh()
+    items = snapshot["favorites"]["items"]
+
+    assert [item["title"] for item in items] == ["Station", "Show"]
+    assert items[1]["kind"] == "podcast"
+    assert snapshot["favorites"]["unsupported"] == 1
+
+    controller.play_favorite(items[1]["id"])
+
+    assert living.queued_item is show
+    assert show.resources[0].uri == (
+        "x-rincon-cpcontainer:10140064ondemand~show?sid=325&flags=100&sn=1"
+    )
     assert living.played_queue_index == 3
 
 
